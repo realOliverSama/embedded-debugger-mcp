@@ -76,7 +76,8 @@ impl FlashManager {
         match erase_type {
             EraseType::All => {
                 debug!("Starting full flash erase");
-                flashing::erase_all(session, FlashProgress::empty()).map_err(|e| {
+                let mut progress = FlashProgress::empty();
+                flashing::erase_all(session, &mut progress).map_err(|e| {
                     DebugError::FlashOperationFailed(format!("Full erase failed: {}", e))
                 })?;
 
@@ -119,7 +120,7 @@ impl FlashManager {
             FileFormat::Auto => {
                 // Auto-detect based on extension
                 match file_path.extension().and_then(|s| s.to_str()) {
-                    Some("elf") => flashing::Format::Elf,
+                    Some("elf") => flashing::Format::Elf(Default::default()),
                     Some("hex") => flashing::Format::Hex,
                     Some("bin") => flashing::Format::Bin(probe_rs::flashing::BinOptions {
                         base_address,
@@ -132,7 +133,7 @@ impl FlashManager {
                     }
                 }
             }
-            FileFormat::Elf => flashing::Format::Elf,
+            FileFormat::Elf => flashing::Format::Elf(Default::default()),
             FileFormat::Hex => flashing::Format::Hex,
             FileFormat::Bin => flashing::Format::Bin(probe_rs::flashing::BinOptions {
                 base_address,
@@ -143,7 +144,6 @@ impl FlashManager {
         // Setup download options - use default and override what we need
         let mut options = flashing::DownloadOptions::default();
         options.verify = verify;
-        options.progress = None;
 
         // Set base address for BIN files - this might need to be handled differently
         if matches!(probe_format, flashing::Format::Bin(_)) {

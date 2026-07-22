@@ -61,7 +61,8 @@ impl EmbeddedDebuggerToolHandler {
                 + Self::memory_tool_router()
                 + Self::diagnostics_tool_router()
                 + Self::rtt_tool_router()
-                + Self::flash_tool_router(),
+                + Self::flash_tool_router()
+                + Self::sram_loader_tool_router(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(config),
             max_sessions,
@@ -105,7 +106,7 @@ mod tests {
             .map(|tool| tool.name.as_ref())
             .collect::<std::collections::HashSet<_>>();
 
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 26);
         for expected in [
             "list_probes",
             "connect",
@@ -120,6 +121,8 @@ mod tests {
             "write_memory",
             "set_breakpoint",
             "clear_breakpoint",
+            "load_elf_to_sram",
+            "read_special_registers",
             "diagnose_fault",
             "unwind_exception",
             "rtt_attach",

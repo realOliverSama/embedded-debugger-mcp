@@ -24,9 +24,11 @@ pub struct ConnectArgs {
     /// Whether to connect under reset
     #[serde(default)]
     pub connect_under_reset: bool,
-    /// Whether to halt after connecting
-    #[serde(default = "default_true")]
-    pub halt_after_connect: bool,
+    /// Whether to halt after connecting.
+    ///
+    /// When omitted, the debugger configuration default is used.
+    #[serde(default)]
+    pub halt_after_connect: Option<bool>,
     /// Debug engine: "probe-rs" (default, native) or "openocd" (GDB RSP).
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -34,6 +36,12 @@ pub struct ConnectArgs {
     /// Requires a running `openocd` exposing its GDB port.
     #[serde(default = "default_openocd_address")]
     pub openocd_address: String,
+}
+
+impl ConnectArgs {
+    pub(crate) fn resolved_halt_after_connect(&self, config_default: bool) -> bool {
+        self.halt_after_connect.unwrap_or(config_default)
+    }
 }
 
 fn default_speed_khz() -> u32 {
@@ -111,6 +119,12 @@ pub struct GetStatusArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiagnoseFaultArgs {
+    /// Session ID
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadSpecialRegistersArgs {
     /// Session ID
     pub session_id: String,
 }
@@ -418,4 +432,78 @@ pub struct RttChannelInfo {
     pub direction: String, // "up", "down"
     pub buffer_size: usize,
     pub flags: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoadElfToSramArgs {
+    /// Session ID
+    pub session_id: String,
+    /// Absolute path to the ELF file to load
+    pub elf_path: String,
+    /// Start of the allowed SRAM range (hex string like "0x34000000" or decimal), inclusive
+    pub sram_start: String,
+    /// End of the allowed SRAM range (hex string like "0x34200000" or decimal), exclusive
+    pub sram_end: String,
+    /// Explicit vector table address (hex or decimal). Required only when the ELF has neither a 'g_pfnVectors' symbol nor an '.isr_vector' section
+    #[serde(default)]
+    pub vector_table_address: Option<String>,
+    /// Start execution after loading: program VTOR/MSP/xPSR/PC from the vector table and run. Default false (load only)
+    #[serde(default)]
+    pub start: Option<bool>,
+    /// Launch mode: "deterministic_reset" (default) or "preserve_state". start=true requires deterministic_reset (preserve_state+start=true is rejected). start=false with deterministic_reset performs a system reset-and-halt before writing; use preserve_state to load without reset
+    #[serde(default)]
+    pub launch_mode: Option<String>,
+    /// Write/verify chunk size in bytes. Default 2048; clamped to the configured memory.max_write_size
+    #[serde(default)]
+    pub chunk_size: Option<usize>,
+}
+
+#[cfg(test)]
+mod connect_args_tests {
+    use super::ConnectArgs;
+
+    #[test]
+    fn explicit_false_overrides_true_config_default() {
+        let args: ConnectArgs = serde_json::from_str(
+            r#"{
+                "probe_selector": "auto",
+                "target_chip": "STM32N647",
+                "halt_after_connect": false
+            }"#,
+        )
+        .expect("ConnectArgs should deserialize");
+
+        assert_eq!(args.halt_after_connect, Some(false));
+        assert!(!args.resolved_halt_after_connect(true));
+    }
+
+    #[test]
+    fn explicit_true_overrides_false_config_default() {
+        let args: ConnectArgs = serde_json::from_str(
+            r#"{
+                "probe_selector": "auto",
+                "target_chip": "STM32N647",
+                "halt_after_connect": true
+            }"#,
+        )
+        .expect("ConnectArgs should deserialize");
+
+        assert_eq!(args.halt_after_connect, Some(true));
+        assert!(args.resolved_halt_after_connect(false));
+    }
+
+    #[test]
+    fn omitted_value_uses_config_default() {
+        let args: ConnectArgs = serde_json::from_str(
+            r#"{
+                "probe_selector": "auto",
+                "target_chip": "STM32N647"
+            }"#,
+        )
+        .expect("ConnectArgs should deserialize");
+
+        assert_eq!(args.halt_after_connect, None);
+        assert!(args.resolved_halt_after_connect(true));
+        assert!(!args.resolved_halt_after_connect(false));
+    }
 }

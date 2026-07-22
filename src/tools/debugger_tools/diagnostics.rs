@@ -8,13 +8,12 @@
 
 use rmcp::{handler::server::tool::Parameters, model::*, tool, tool_router, ErrorData as McpError};
 use std::future::Future;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use super::session::EmbeddedDebuggerToolHandler;
 use crate::backend::{CoreRegId, DebugBackend};
 use crate::tools::types::*;
-use probe_rs::debug::{DebugInfo, DebugRegisters};
-use probe_rs::exception_handler_for_core;
+use probe_rs_debug::{exception_handler_for_core, DebugInfo, DebugRegisters};
 
 // ARMv7-M System Control Block fault registers (identical on all Cortex-M).
 // Source: ARMv7-M Architecture Reference Manual, System Control Block.
@@ -191,6 +190,53 @@ impl EmbeddedDebuggerToolHandler {
             .unwrap_or_else(|e| format!("{{\"error\":\"serialize failed: {}\"}}", e));
 
         info!("Diagnose completed for session: {}", args.session_id);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Read the Cortex-M special registers that control interrupt masking and \
+        execution mode (PRIMASK, BASEPRI, FAULTMASK, CONTROL) plus MSP/PSP/xPSR, decoded from \
+        the DCRSR EXTRA register. Read-only: no target code is executed and nothing is modified. \
+        Requires a halted core. Also reports DHCSR.S_SDE (secure debug enabled); the core's \
+        current security state is not exposed by probe-rs and is reported as unavailable."
+    )]
+    async fn read_special_registers(
+        &self,
+        Parameters(args): Parameters<ReadSpecialRegistersArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        debug!("Reading special registers for session: {}", args.session_id);
+        let session_arc = self.get_session(&args.session_id).await?;
+
+        let regs = {
+            let mut backend = session_arc.backend.lock().await;
+            backend.read_special_registers().await.map_err(|e| {
+                error!(
+                    "Failed to read special registers for session {}: {}",
+                    args.session_id, e
+                );
+                McpError::internal_error(format!("Failed to read special registers: {}", e), None)
+            })?
+        };
+
+        let report = serde_json::json!({
+            "session": args.session_id,
+            "primask": regs.primask,
+            "primask_meaning": if regs.primask & 1 != 0 { "all maskable interrupts BLOCKED" } else { "interrupts allowed" },
+            "basepri": regs.basepri,
+            "faultmask": regs.faultmask,
+            "control": regs.control,
+            "msp": format!("0x{:08X}", regs.msp),
+            "psp": format!("0x{:08X}", regs.psp),
+            "xpsr": format!("0x{:08X}", regs.xpsr),
+            "dhcsr_sde": regs.dhcsr_sde,
+            "security_state": "unavailable (probe-rs does not expose the current security state; DHCSR.S_SDE reported separately)",
+            "note": "Read-only DCRSR access on a halted core; no target code executed."
+        });
+
+        let text = serde_json::to_string_pretty(&report)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialize failed: {}\"}}", e));
+
+        info!("Special registers read for session: {}", args.session_id);
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 

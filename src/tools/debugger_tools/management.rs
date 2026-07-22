@@ -123,7 +123,7 @@ impl EmbeddedDebuggerToolHandler {
                         let connect_under_reset =
                             args.connect_under_reset || self.config.debugger.connect_under_reset;
                         let halt_after_connect =
-                            args.halt_after_connect || self.config.debugger.halt_on_connect;
+                            args.resolved_halt_after_connect(self.config.debugger.halt_on_connect);
 
                         info!("Attaching to target: {}", args.target_chip);
                         let attach_result = if connect_under_reset {
@@ -352,7 +352,10 @@ impl EmbeddedDebuggerToolHandler {
             )
         })?;
 
-        if args.halt_after_connect {
+        let halt_after_connect =
+            args.resolved_halt_after_connect(self.config.debugger.halt_on_connect);
+
+        if halt_after_connect {
             let _ = backend.halt().await;
         }
 
@@ -382,7 +385,7 @@ impl EmbeddedDebuggerToolHandler {
             Halted after connect: {}\n\n\
             Available: read_memory, write_memory, halt, run, step, reset, breakpoints, \
             diagnose_fault. Flash and RTT require the probe-rs backend.",
-            session_id, address, args.target_chip, args.halt_after_connect
+            session_id, address, args.target_chip, halt_after_connect
         );
 
         info!("Created OpenOCD debug session: {}", session_id);

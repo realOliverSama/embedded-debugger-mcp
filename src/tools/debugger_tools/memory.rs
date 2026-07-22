@@ -165,6 +165,30 @@ impl EmbeddedDebuggerToolHandler {
 
         {
             let mut backend = session_arc.backend.lock().await;
+
+            // Validate BEFORE touching any hardware breakpoint slot: a rejected
+            // address must not consume a comparator, change core state, or
+            // leave session resources behind.
+            let context = backend.breakpoint_address_context().await.map_err(|e| {
+                error!(
+                    "Failed to query breakpoint validation context for session {}: {}",
+                    args.session_id, e
+                );
+                McpError::internal_error(
+                    format!("Failed to validate breakpoint address: {}", e),
+                    None,
+                )
+            })?;
+            if let Err(reason) =
+                super::breakpoint_policy::ensure_breakpoint_address_valid(address, &context)
+            {
+                error!(
+                    "Rejected breakpoint for session {} at 0x{:08X}: {}",
+                    args.session_id, address, reason
+                );
+                return Err(McpError::invalid_params(reason, None));
+            }
+
             backend.set_hw_breakpoint(address).await.map_err(|e| {
                 error!(
                     "Failed to set breakpoint for session {}: {}",

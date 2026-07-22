@@ -8,7 +8,10 @@
 use async_trait::async_trait;
 
 use super::rsp::{decode_hex, encode_hex, RspClient};
-use super::{BackendKind, CoreRegId, CoreState, DebugBackend};
+use super::{
+    BackendKind, BreakpointAddressContext, CoreRegId, CoreState, DebugBackend, MaskNormalization,
+    SpecialRegisters, SramLaunchState,
+};
 use crate::error::{DebugError, Result};
 
 pub struct OpenOcdBackend {
@@ -158,6 +161,38 @@ impl DebugBackend for OpenOcdBackend {
     async fn clear_hw_breakpoint(&mut self, address: u64) -> Result<()> {
         let reply = self.rsp.command(&format!("z1,{:x},2", address)).await?;
         expect_ok(&reply, "clear breakpoint")
+    }
+
+    async fn breakpoint_address_context(&self) -> Result<BreakpointAddressContext> {
+        // The GDB RSP link to OpenOCD exposes neither the target memory map nor
+        // a reliable core architecture, so executability cannot be verified on
+        // this backend. Report "unknown"; the tool layer applies a safe
+        // rejection policy instead of trusting unverifiable addresses.
+        Ok(BreakpointAddressContext {
+            is_cortex_m: false,
+            regions: None,
+        })
+    }
+
+    async fn prepare_sram_launch(&mut self, _launch: SramLaunchState) -> Result<()> {
+        Err(DebugError::InternalError(
+            "SRAM launch is not supported on the OpenOCD backend; reconnect with backend=\"probe-rs\""
+                .to_string(),
+        ))
+    }
+
+    async fn read_special_registers(&mut self) -> Result<SpecialRegisters> {
+        Err(DebugError::InternalError(
+            "read_special_registers is not supported on the OpenOCD backend; reconnect with backend=\"probe-rs\""
+                .to_string(),
+        ))
+    }
+
+    async fn clear_interrupt_masks(&mut self) -> Result<MaskNormalization> {
+        Err(DebugError::InternalError(
+            "clear_interrupt_masks is not supported on the OpenOCD backend; reconnect with backend=\"probe-rs\""
+                .to_string(),
+        ))
     }
 }
 

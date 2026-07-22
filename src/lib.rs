@@ -10,6 +10,7 @@ pub mod debugger;
 pub mod error;
 pub mod flash;
 pub mod rtt;
+pub mod sram;
 pub mod tools;
 pub mod utils;
 
