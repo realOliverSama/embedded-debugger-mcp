@@ -153,6 +153,17 @@ pub fn plan_sram_load(
         if memsz == 0 {
             continue; // nothing to load; harmless
         }
+        if filesz == 0 {
+            // Pure NOLOAD segment (no file bytes): e.g. an external-RAM .bss
+            // (.EXTRAM at 0x90000000) placed by the linker script but never
+            // written by a debugger. GDB/STM32CubeIDE skip such segments
+            // entirely and the owning application initializes the memory
+            // itself (in-SRAM .bss is zeroed by the startup code). Planning
+            // a zero-fill — and whitelist-checking the address — would be
+            // stricter than GDB semantics and could target an uninitialized
+            // external device, so plan no writes for it.
+            continue;
+        }
         let seg_end = paddr
             .checked_add(memsz)
             .ok_or_else(|| format!("PT_LOAD at 0x{paddr:08X} size 0x{memsz:X} overflows u64."))?;
@@ -654,6 +665,40 @@ mod tests {
         );
         let plan = plan_sram_load(&elf, &WL, None).unwrap();
         assert_eq!(plan.segments.len(), 2);
+    }
+
+    #[test]
+    fn noload_zero_filesz_segment_outside_whitelist_is_skipped() {
+        // AlienTek Debug builds place a multi-MB .EXTRAM (NOLOAD) segment at
+        // 0x90000000 (XSPI1 HyperRAM). It carries no file bytes and no
+        // debugger ever writes it; the planner must skip it instead of
+        // refusing the whole ELF for exceeding the SRAM whitelist.
+        let mut seg_data = vec![0u8; 0x600];
+        seg_data[0x400..0x404].copy_from_slice(&0x3420_0000u32.to_le_bytes());
+        seg_data[0x404..0x408].copy_from_slice(&0x3400_04A1u32.to_le_bytes());
+        let elf = build_elf(
+            0x3400_04A1,
+            &[
+                SegmentSpec {
+                    paddr: 0x3400_0000,
+                    data: seg_data,
+                    memsz: 0x700,
+                    flags: 0x7,
+                },
+                SegmentSpec {
+                    paddr: 0x9000_0000,
+                    data: Vec::new(),
+                    memsz: 0x1F_4000, // 2 MB NOLOAD external-RAM bss
+                    flags: 0x6,       // RW, not executable
+                },
+            ],
+            &[(VECTOR_TABLE_SECTION, 0x3400_0400)],
+            &[(VECTOR_TABLE_SYMBOL, 0x3400_0400)],
+        );
+        let plan = plan_sram_load(&elf, &WL, None)
+            .expect("NOLOAD-only segment outside the whitelist must be skipped");
+        assert_eq!(plan.segments.len(), 1);
+        assert_eq!(plan.segments[0].paddr, 0x3400_0000);
     }
 
     #[test]
