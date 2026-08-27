@@ -137,9 +137,14 @@ pub fn plan_sram_load(
         }
         let paddr: u64 = ph.p_paddr(elf.endian()).into();
         let vaddr: u64 = ph.p_vaddr(elf.endian()).into();
-        if paddr != vaddr {
+        let executable = ph.p_flags(elf.endian()) & PF_X != 0;
+        if paddr != vaddr && executable {
+            // Execution contract: code must be written at the address it runs
+            // from. A non-executable data segment with VMA != LMA is the LRUN
+            // linker layout (.data LMA follows .text; CRT copies LMA -> VMA at
+            // startup), matching GDB/STM32CubeIDE `load` which writes at LMA.
             return Err(format!(
-                "PT_LOAD has paddr 0x{paddr:08X} != vaddr 0x{vaddr:08X}; cannot explain the mapping, refusing."
+                "Executable PT_LOAD has paddr 0x{paddr:08X} != vaddr 0x{vaddr:08X}; refusing to run code that was not loaded at its execution address."
             ));
         }
         let filesz: u64 = ph.p_filesz(elf.endian()).into();
@@ -361,6 +366,7 @@ mod tests {
     // ---- minimal ELF32 LE ARM builder for tests ----
     struct SegmentSpec {
         paddr: u32,
+        vaddr: Option<u32>,
         data: Vec<u8>,
         memsz: u32,
         flags: u32,
@@ -389,11 +395,12 @@ mod tests {
             }
             let file_off = (phoff + phnum * PHSIZE + payload.len()) as u32;
             payload.extend_from_slice(&seg.data);
+            let vaddr = seg.vaddr.unwrap_or(seg.paddr);
             phdrs.push([
                 1, // PT_LOAD
                 file_off,
-                seg.paddr, // vaddr
-                seg.paddr, // paddr
+                vaddr,
+                seg.paddr,
                 seg.data.len() as u32,
                 seg.memsz,
                 seg.flags,
@@ -565,6 +572,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x700, // 0x100 BSS zero-fill
                 flags: 0x7,   // RWE
@@ -604,6 +612,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x600,
                 flags: 0x7,
@@ -624,6 +633,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x600,
                 flags: 0x7,
@@ -649,12 +659,14 @@ mod tests {
             &[
                 SegmentSpec {
                     paddr: 0x3400_0000,
+                    vaddr: None,
                     data: seg0,
                     memsz: 0x600,
                     flags: 0x5,
                 },
                 SegmentSpec {
                     paddr: 0x3401_0000,
+                    vaddr: None,
                     data: vec![1, 2, 3, 4],
                     memsz: 0x20,
                     flags: 0x6,
@@ -681,12 +693,14 @@ mod tests {
             &[
                 SegmentSpec {
                     paddr: 0x3400_0000,
+                    vaddr: None,
                     data: seg_data,
                     memsz: 0x700,
                     flags: 0x7,
                 },
                 SegmentSpec {
                     paddr: 0x9000_0000,
+                    vaddr: None,
                     data: Vec::new(),
                     memsz: 0x1F_4000, // 2 MB NOLOAD external-RAM bss
                     flags: 0x6,       // RW, not executable
@@ -707,6 +721,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x2000_0000,
+                vaddr: None,
                 data: vec![0; 0x10],
                 memsz: 0x10,
                 flags: 0x7,
@@ -719,12 +734,76 @@ mod tests {
     }
 
     #[test]
+    fn data_segment_vma_ne_lma_planned_at_lma() {
+        // Real LRUN linker layout (01_LED Debug ELF): exec segment holds the
+        // vector table; .data has LMA right after .text (bank A) and VMA in
+        // bank B. GDB/STM32CubeIDE load writes the data segment at its LMA;
+        // the CRT startup then copies LMA -> VMA.
+        let mut data = vec![0u8; 0xC];
+        data.copy_from_slice(&[0xAA; 0xC]);
+        let vec_data = {
+            let mut d = vec![0u8; 0x800]; // exec segment covers Reset target 0x340004A0
+            d[0x400..0x404].copy_from_slice(&0x3420_0000u32.to_le_bytes()); // MSP
+            d[0x404..0x408].copy_from_slice(&0x3400_04A1u32.to_le_bytes()); // Reset
+            d
+        };
+        let elf = build_elf(
+            0x3400_04A1,
+            &[
+                SegmentSpec {
+                    paddr: 0x3400_0000,
+                    vaddr: None,
+                    data: vec_data,
+                    memsz: 0x800,
+                    flags: 0x7, // exec: vector table + code
+                },
+                SegmentSpec {
+                    paddr: 0x3400_040C,
+                    vaddr: Some(0x3408_0000),
+                    data,
+                    memsz: 0x10,
+                    flags: 0x6, // RW data, LMA != VMA
+                },
+            ],
+            &[(".isr_vector", 0x3400_0400)],
+            &[],
+        );
+        let plan = plan_sram_load(&elf, &WL, None).expect("LRUN layout must be accepted");
+        assert_eq!(plan.segments.len(), 2);
+        assert!(plan.segments[0].executable, "first segment must be exec");
+        assert_eq!(
+            plan.segments[1].paddr, 0x3400_040C,
+            "data segment must be written at its LMA"
+        );
+        assert!(!plan.segments[1].executable);
+    }
+
+    #[test]
+    fn executable_segment_vma_ne_lma_rejected() {
+        let elf = build_elf(
+            0x3400_04A1,
+            &[SegmentSpec {
+                paddr: 0x3400_0000,
+                vaddr: Some(0x3408_0000),
+                data: vec![0; 0x20],
+                memsz: 0x20,
+                flags: 0x7, // executable
+            }],
+            &[],
+            &[],
+        );
+        let err = plan_sram_load(&elf, &WL, None).unwrap_err();
+        assert!(err.contains("Executable PT_LOAD"), "{err}");
+    }
+
+    #[test]
     fn flash_peripheral_ppb_addresses_rejected() {
         for paddr in [0x0800_0000u32, 0x4000_0000, 0xE000_E000, 0x7010_0000] {
             let elf = build_elf(
                 0x3400_04A1,
                 &[SegmentSpec {
                     paddr,
+                    vaddr: None,
                     data: vec![0; 0x10],
                     memsz: 0x10,
                     flags: 0x7,
@@ -743,6 +822,7 @@ mod tests {
     fn filesz_greater_than_memsz_rejected() {
         let mut ph = SegmentSpec {
             paddr: 0x3400_0000,
+            vaddr: None,
             data: vec![0; 0x20],
             memsz: 0x10,
             flags: 0x7,
@@ -791,6 +871,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x600,
                 flags: 0x7,
@@ -811,6 +892,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x600,
                 flags: 0x7,
@@ -830,6 +912,7 @@ mod tests {
             0x3400_04A0,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x600,
                 flags: 0x7,
@@ -850,6 +933,7 @@ mod tests {
             0x3400_04A1,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: seg_data,
                 memsz: 0x600,
                 flags: 0x7,
@@ -867,6 +951,7 @@ mod tests {
             0x2000_0001,
             &[SegmentSpec {
                 paddr: 0x3400_0000,
+                vaddr: None,
                 data: vec![0; 0x600],
                 memsz: 0x600,
                 flags: 0x7,

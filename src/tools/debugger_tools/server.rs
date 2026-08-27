@@ -117,7 +117,10 @@ mod tests {
             "#/$defs/MemoryRange"
         );
         assert!(schema.get("definitions").is_none());
-        assert_eq!(schema["$defs"]["MemoryRange"]["properties"]["nested"]["$ref"], "#/$defs/Inner");
+        assert_eq!(
+            schema["$defs"]["MemoryRange"]["properties"]["nested"]["$ref"],
+            "#/$defs/Inner"
+        );
     }
 
     #[test]
